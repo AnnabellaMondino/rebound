@@ -3,6 +3,54 @@ Changelog
 
 This changelog only includes the most important changes in recent updates. For a full log of all changes, please refer to git.
 
+Version 3.8.3
+--------------
+* Improves and fixes various issues related to variational equations and MEGNO. 
+
+Version 3.8.2
+--------------
+* Fixes a bug which resulted in duplicate snapshots in SimulationArchives when restarting simulations.
+
+Version 3.8.1
+--------------
+* Syntax change on the python side to create a simulation from a binary file or SimulationArchive:
+  rebound.Simulation.from_file("test.bin") becomes rebound.Simulation("test.bin") 
+  rebound.Simulation.from_archive("test.bin",5) becomes rebound.Simulation("test.bin",5) 
+
+Version 3.8.0
+--------------
+* The hybrid integrator MERCURIUS has been completely rewritten. It can now much more easily be used in simulations where physical collisions occur. There are no more hidden particle arrays in the background, meaning adding and removing particles can occur in the same way as for other integrators. It also works reliably with any additional forces.
+* The old hybrid integrator HERMES has been removed. MERCURIUS should always be equal or better in performance and accuracy.
+
+Version 3.7.1 
+--------------
+* Added getBezierPaths to SimulationArchive to allow for easy plotting of complicated trajectories. To do this, store a lot of snapshots in the SimulationArchive (several per orbit!). 
+* Added functionality to add, subtract, multiply and divide simulations. This might be useful when developing new algorithms, but is most likely not useful for most users.
+
+Version 3.7.0
+--------------
+* Added a deep copy functionality: reb_copy_simulation() in C, and sim.copy() in python. 
+* Refactored WHFast to enable calling only certain substeps. 
+
+Version 3.6.8
+--------------
+* Added the rhill property to reb_orbit in C and the Orbit and Particle classes in Python. This parameter corresponds to the circular Hill radius of the particle: a*pow(m/(3M),1./3.).
+
+Version 3.6.7
+--------------
+* Fixes an issue related to collisions and the Mercurius integrator that prevented the lastcollision property to be updated.
+
+Version 3.6.6
+--------------
+* New: Fancy plotting routine. Usage: rebound.OrbitPlot(sim, fancy=True)
+
+Version 3.6.5
+--------------
+* One can now add particles from NASA Horizons using Julian Days. For example: sim.add("Earth", date="JD2458327.500000")
+
+Version 3.6.4
+--------------
+* Fixes a memory leak when using the old SimulationArchive version. Thanks to Ian Rabago for reporting the issue.
 
 Version 3.6.2
 --------------

@@ -48,7 +48,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
         return;
     }
     if (snapshot<0) snapshot += sa->nblobs;
-    if (snapshot>sa->nblobs || snapshot<0){
+    if (snapshot>=sa->nblobs || snapshot<0){
         *warnings |= REB_INPUT_BINARY_ERROR_OUTOFRANGE;
         return;
     }
@@ -64,7 +64,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
     r->simulationarchive_version = 0;
 
     fseek(inf, 0, SEEK_SET);
-    while(reb_input_field(r, inf, warnings)){ }
+    while(reb_input_field(r, inf, warnings,NULL)){ }
 
     // Done?
     if (snapshot==0) return;
@@ -89,7 +89,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
         switch (r->integrator){
             case REB_INTEGRATOR_JANUS:
                 {
-                    if (r->ri_janus.allocated_N<r->N){
+                    if (r->ri_janus.allocated_N<(unsigned int)r->N){
                         if (r->ri_janus.p_int){
                             free(r->ri_janus.p_int);
                         }
@@ -106,7 +106,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
                     struct reb_particle* ps = r->particles;
                     if (r->ri_whfast.safe_mode==0){
                         // If same mode is off, store unsynchronized Jacobi coordinates
-                        if (r->ri_whfast.allocated_N<r->N){
+                        if (r->ri_whfast.allocated_N<(unsigned int)r->N){
                             if (r->ri_whfast.p_jh){
                                 free(r->ri_whfast.p_jh);
                             }
@@ -129,7 +129,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
                         r->ri_whfast.is_synchronized=0.;
                         // Recalculate total mass
                         double msum = r->particles[0].m;
-                        for (unsigned int i=1;i<r->N;i++){
+                        for (int i=1;i<r->N;i++){
                             r->ri_whfast.p_jh[i].m = r->particles[i].m;
                             r->ri_whfast.p_jh[i].r = r->particles[i].r;
                             msum += r->particles[i].m;
@@ -145,7 +145,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
                     struct reb_particle* ps = r->particles;
                     if (r->ri_mercurius.safe_mode==0){
                         // If same mode is off, store unsynchronized Jacobi coordinates
-                        if (r->ri_whfast.allocated_N<r->N){
+                        if (r->ri_whfast.allocated_N<(unsigned int)r->N){
                             if (r->ri_whfast.p_jh){
                                 free(r->ri_whfast.p_jh);
                             }
@@ -163,19 +163,18 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
                         fread(&(ps[i].vy),sizeof(double),1,inf);
                         fread(&(ps[i].vz),sizeof(double),1,inf);
                     }
-                    if (r->ri_mercurius.rhill){
-                        free(r->ri_mercurius.rhill);
+                    if (r->ri_mercurius.dcrit){
+                        free(r->ri_mercurius.dcrit);
                     }
-                    r->ri_mercurius.rhill = malloc(sizeof(double)*r->N);
-                    r->ri_mercurius.rhillallocatedN = r->N;
-                    fread(r->ri_mercurius.rhill,sizeof(double),r->N,inf);
+                    r->ri_mercurius.dcrit = malloc(sizeof(double)*r->N);
+                    r->ri_mercurius.dcrit_allocatedN = r->N;
+                    fread(r->ri_mercurius.dcrit,sizeof(double),r->N,inf);
                     if (r->ri_mercurius.safe_mode==0){
                         // Assume we are not synchronized
                         r->ri_mercurius.is_synchronized=0.;
                         // Recalculate total mass
-                        r->ri_mercurius.m0 = r->particles[0].m;
                         double msum = r->particles[0].m;
-                        for (unsigned int i=1;i<r->N;i++){
+                        for (int i=1;i<r->N;i++){
                             r->ri_whfast.p_jh[i].m = r->particles[i].m;
                             r->ri_whfast.p_jh[i].r = r->particles[i].r;
                             msum += r->particles[i].m;
@@ -201,11 +200,11 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
                     }
                     reb_integrator_ias15_alloc(r);
                     const int N3 = r->N*3;
-                    reb_read_dp7(&(r->ri_ias15.b)  ,N3,inf);
-                    reb_read_dp7(&(r->ri_ias15.csb),N3,inf);
-                    reb_read_dp7(&(r->ri_ias15.e)  ,N3,inf);
-                    reb_read_dp7(&(r->ri_ias15.br) ,N3,inf);
-                    reb_read_dp7(&(r->ri_ias15.er) ,N3,inf);
+                    reb_read_dp7(&(r->ri_ias15.b)  ,N3,inf,NULL);
+                    reb_read_dp7(&(r->ri_ias15.csb),N3,inf,NULL);
+                    reb_read_dp7(&(r->ri_ias15.e)  ,N3,inf,NULL);
+                    reb_read_dp7(&(r->ri_ias15.br) ,N3,inf,NULL);
+                    reb_read_dp7(&(r->ri_ias15.er) ,N3,inf,NULL);
                     fread((r->ri_ias15.csx),sizeof(double)*N3,1,inf);
                     fread((r->ri_ias15.csv),sizeof(double)*N3,1,inf);
                 }
@@ -217,7 +216,7 @@ void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simul
         }
     }else{
         // Version 2
-        while(reb_input_field(r, inf, warnings)){ }
+        while(reb_input_field(r, inf, warnings,NULL)){ }
     }
     return;
 }
@@ -283,6 +282,9 @@ void reb_read_simulationarchive_with_messages(struct reb_simulationarchive* sa, 
                 break;
             case REB_BINARY_FIELD_TYPE_SAAUTOINTERVAL:
                 fread(&(sa->auto_interval), sizeof(double),1,sa->inf);
+                break;
+            case REB_BINARY_FIELD_TYPE_SAAUTOSTEP:
+                fread(&(sa->auto_step), sizeof(unsigned long long),1,sa->inf);
                 break;
             default:
                 fseek(sa->inf,field.size,SEEK_CUR);
@@ -409,13 +411,24 @@ static int reb_simulationarchive_snapshotsize(struct reb_simulation* const r){
 
 void reb_simulationarchive_heartbeat(struct reb_simulation* const r){
     if (r->simulationarchive_filename!=NULL){
-        if (r->simulationarchive_auto_interval!=0. && r->simulationarchive_auto_walltime!=0.){
-            reb_error(r,"Both simulationarchive_auto_interval and simulationarchive_auto_walltime are set. Only set one at a time.");
+        int modes = 0;
+        if (r->simulationarchive_auto_interval!=0) modes++;
+        if (r->simulationarchive_auto_walltime!=0.) modes++;
+        if (r->simulationarchive_auto_step!=0) modes++;
+        if (modes>1){
+            reb_error(r,"Only use one of simulationarchive_auto_interval, simulationarchive_auto_walltime, or simulationarchive_auto_step");
         }
         if (r->simulationarchive_auto_interval!=0.){
             const double sign = r->dt>0.?1.:-1;
             if (sign*r->simulationarchive_next <= sign*r->t){
                 r->simulationarchive_next += sign*r->simulationarchive_auto_interval;
+                //Snap
+                reb_simulationarchive_snapshot(r, NULL);
+            }
+        }
+        if (r->simulationarchive_auto_step!=0.){
+            if (r->simulationarchive_next_step <= r->steps_done){
+                r->simulationarchive_next_step += r->simulationarchive_auto_step;
                 //Snap
                 reb_simulationarchive_snapshot(r, NULL);
             }
@@ -495,7 +508,7 @@ void reb_simulationarchive_snapshot(struct reb_simulation* const r, const char* 
                             fwrite(&(ps[i].vy),sizeof(double),1,of);
                             fwrite(&(ps[i].vz),sizeof(double),1,of);
                         }
-                        fwrite(r->ri_mercurius.rhill,sizeof(double),r->N,of);
+                        fwrite(r->ri_mercurius.dcrit,sizeof(double),r->N,of);
                     }
                     break;
                 case REB_INTEGRATOR_IAS15:
@@ -547,7 +560,7 @@ void reb_simulationarchive_snapshot(struct reb_simulation* const r, const char* 
             // Create buffer containing current binary file
             char* buf_new;
             size_t size_new;
-            _reb_output_binary_to_stream(r, &buf_new, &size_new);
+            reb_output_binary_to_stream(r, &buf_new, &size_new);
             
             // Create buffer containing diff
             char* buf_diff;
@@ -607,12 +620,18 @@ void reb_simulationarchive_automate_interval(struct reb_simulation* const r, con
 
 void reb_simulationarchive_automate_walltime(struct reb_simulation* const r, const char* filename, double walltime){
     if(_reb_simulationarchive_automate_set_filename(r,filename)<0) return;
-    if(r->simulationarchive_auto_walltime != walltime){
+    // Note that this will create two snapshots if restarted.
+    r->simulationarchive_auto_walltime = walltime;
+    r->simulationarchive_next = r->walltime;
+}
+
+void reb_simulationarchive_automate_step(struct reb_simulation* const r, const char* filename, unsigned long long step){
+    if(_reb_simulationarchive_automate_set_filename(r,filename)<0) return;
+    if(r->simulationarchive_auto_step != step){
         // Only update simulationarchive_next if interval changed. 
         // This ensures that interrupted simulations will continue
         // after being restarted from a simulationarchive
-        r->simulationarchive_auto_walltime = walltime;
-        r->simulationarchive_next = r->walltime;
+        r->simulationarchive_auto_step = step;
+        r->simulationarchive_next_step = r->steps_done;
     }
 }
-

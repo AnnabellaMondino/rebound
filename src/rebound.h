@@ -74,6 +74,33 @@ extern volatile sig_atomic_t reb_sigint;  ///< Graceful global interrupt handler
 // Forward declarations
 struct reb_simulation;
 struct reb_display_data;
+struct reb_treecell;
+
+/**
+ * @brief Structure representing one REBOUND particle.
+ * @details This structure is used to represent one particle. 
+ * If this structure is changed, the corresponding python structure
+ * needs to be changes as well. Also update the equivalent declaration 
+ * for MPI in communications_mpi.c.
+ */
+struct reb_particle {
+    double x;           ///< x-position of the particle. 
+    double y;           ///< y-position of the particle. 
+    double z;           ///< z-position of the particle. 
+    double vx;          ///< x-velocity of the particle. 
+    double vy;          ///< y-velocity of the particle. 
+    double vz;          ///< z-velocity of the particle. 
+    double ax;          ///< x-acceleration of the particle. 
+    double ay;          ///< y-acceleration of the particle. 
+    double az;          ///< z-acceleration of the particle. 
+    double m;           ///< Mass of the particle. 
+    double r;           ///< Radius of the particle. 
+    double lastcollision;       ///< Last time the particle had a physical collision.
+    struct reb_treecell* c;     ///< Pointer to the cell the particle is currently in.
+    uint32_t hash;      ///< hash to identify particle.
+    void* ap;           ///< Functionality for externally adding additional properties to particles.
+    struct reb_simulation* sim; ///< Pointer to the parent simulation.
+};
 
 /**
  * @brief Generic 3d vector, for internal use only.
@@ -172,6 +199,9 @@ struct reb_simulation_integrator_ias15 {
     // The following values are used for resetting the b and e coefficients if a timestep gets rejected
     struct reb_dp7 br;
     struct reb_dp7 er;
+
+    int* map;               // map to particles (identity map for non-mercurius simulations)
+    int map_allocated_N;    // allocated size for map
     /**
      * @endcond
      */
@@ -182,7 +212,23 @@ struct reb_simulation_integrator_ias15 {
  * @brief This structure contains variables and pointer used by the MERCURIUS integrator.
  */
 struct reb_simulation_integrator_mercurius {
-    double rcrit;               ///< Critical radius in units of Hill radii
+   /**
+    * @brief This is a function pointer to the force switching function used.
+    * @details If NULL (the default), the MERCURY switching function will be used.
+    * The argument d is the distance between two particles.
+    * The argument dcrit is the maximum of the critical distances of the two particles.
+    * The return value is a scalar between 0 and 1. If it always returns 1, then the
+    * integrator becomes the standard Wisdom-Holman integrator.
+    */
+    double (*L) (const struct reb_simulation* const r, double d, double dcrit);  
+    
+    /** 
+     * @brief Switching distance in units of the Hill radius 
+     * @brief The switching distances for particles are calculated automastically
+     * based on multiple criteria. One criteria calculates the Hill radius of 
+     * particles and then multiplies it with the hillfac variable. 
+     */ 
+    double hillfac;        
     
     /** 
      * @brief Setting this flag to one will recalculate heliocentric coordinates from the particle structure at the beginning of the next timestep. 
@@ -194,13 +240,14 @@ struct reb_simulation_integrator_mercurius {
     unsigned int recalculate_coordinates_this_timestep;
 
     /** 
-     * @brief Setting this flag to one will recalculate Hill radii at the beginning of the next timestep. 
+     * @brief Setting this flag to one will recalculate the critical switchover 
+     * distances dcrit at the the beginning of the next timestep. 
      * @details After one timestep, the flag gets set back to 0. 
-     * If you want to recalculate hill radii at every every timestep, you 
+     * If you want to recalculate dcrit at every every timestep, you 
      * also need to set this flag to 1 before every timestep.
      * Default is 0.
      */ 
-    unsigned int recalculate_rhill_this_timestep;
+    unsigned int recalculate_dcrit_this_timestep;
 
     /**
      * @brief If this flag is set (the default), the integrator will 
@@ -208,71 +255,23 @@ struct reb_simulation_integrator_mercurius {
      * every timestep, to avoid problems with outputs or particle modifications
      * between timesteps. 
      * @details Setting it to 0 will result in a speedup, but care
-     * must be taken to synchronize and recalculate jacobi coordinates when needed.
+     * must be taken to synchronize and recalculate coordinates when needed.
      */
     unsigned int safe_mode;
     
-    /**
-     * @brief Generate inertial coordinates at the end of the integration, but do not change the Jacobi/heliocentric coordinates
-     * @details Danger zone! Only use this flag if you are absolutely sure
-     * what you are doing. This is intended for
-     * simulation which have to be reproducible on a bit by bit basis.
-     */
-    unsigned int keep_unsynchronized;
-    
     unsigned int is_synchronized;   ///< Flag to determine if current particle structure is synchronized
-    unsigned int mode;          ///< Internal. 0 if WH is operating, 1 if IAS15 is operating.
-    unsigned int encounterN;    ///< Number of particles currently having an encounter
-    unsigned int globalN;       
-    unsigned int globalNactive;
-    unsigned int allocatedN;
-    unsigned int rhillallocatedN;
-    unsigned int encounterAllocatedN;
-    double m0;
-    double* rhill;
-    double* encounterRhill;
-    unsigned int* encounterIndicies;
-    struct reb_particle* encounterParticles;
-    struct reb_particle* REBOUND_RESTRICT p_hold;
-};
-
-/**
- * @brief This structure contains variables and pointer used by the HERMES integrator.
- */
-struct reb_simulation_integrator_hermes {
-    struct reb_simulation* mini;            ///< Mini simulation integrated using IAS15. See Silburt et al 2016.
-    struct reb_simulation* global;          ///< Global simulation integrated using WHFast. Only set in mini simulation. See Silburt et al 2016).
-    double hill_switch_factor;              ///< Criteria for switching between IAS15 and WHFast in terms of Hill radii (default: 3.).
-    double solar_switch_factor;             ///< Criteria for switching between IAS15 and WHfast in terms of the central star's physical radius (default: 15.).
-    int adaptive_hill_switch_factor;        ///< Flag (default: 1) for automatically calculating the appropriate HSF value each iteration
-    
-    int mini_active;                        ///< Flag that is set to 1 by HERMES if the mini simulation is active in this timestep.
-    
-    /**
-     * @cond PRIVATE
-     * Internal data structures below. Nothing to be changed by the user.
-     */
-    double current_hill_switch_factor;        ///< HSF used in current timestep (useful to debug adaptive HSF)
-    double energy_before_timestep;            ///< Store energy at the beginning of timestep. Used to track energy_offset.
-    int collision_this_global_dt;           
-    
-    int* global_index_from_mini_index;
-    int global_index_from_mini_index_N;
-    int global_index_from_mini_index_Nmax;
-    
-    int* is_in_mini;
-    int is_in_mini_Nmax;
-    
-    double* a_i;
-    double* a_f;
-    int a_Nmax;
-    
-    int timestep_too_large_warning;
-    unsigned long long steps;
-    unsigned long long steps_miniactive;
-    unsigned long long steps_miniN;
-    
-    /** @endcond */
+    unsigned int mode;              ///< Internal. 0 if WH is operating, 1 if IAS15 is operating.
+    unsigned int encounterN;        ///< Number of particles currently having an encounter
+    unsigned int encounterNactive;  ///< Number of particles currently having an encounter
+    unsigned int allocatedN;        ///< Current size of allocated internal arrays
+    unsigned int allocatedN_additionalforces;        ///< Current size of allocated internal particles_backup_additionalforces array
+    unsigned int dcrit_allocatedN;  ///< Current size of dcrit arrays
+    double* dcrit;                  ///< Switching radii for particles
+    struct reb_particle* REBOUND_RESTRICT particles_backup;     ///< Internal array, contains coordinates before Kepler step for encounter prediction
+    struct reb_particle* REBOUND_RESTRICT particles_backup_additionalforces;     ///< Internal array, contains coordinates before Kepler step for encounter prediction
+    int* encounter_map;             ///< Map to represent which particles are integrated with ias15
+    struct reb_vec3d com_pos;       ///< Used internally to keep track of the centre of mass during the timestep
+    struct reb_vec3d com_vel;       ///< Used internally to keep track of the centre of mass during the timestep
 };
 
 /**
@@ -562,13 +561,6 @@ enum REB_BINARY_FIELD_TYPE {
     REB_BINARY_FIELD_TYPE_IAS15_MINDT = 70,
     REB_BINARY_FIELD_TYPE_IAS15_EPSILONGLOBAL = 71,
     REB_BINARY_FIELD_TYPE_IAS15_ITERATIONSMAX = 72,
-    REB_BINARY_FIELD_TYPE_HERMES_HSF = 73,
-    REB_BINARY_FIELD_TYPE_HERMES_SSF = 74,
-    REB_BINARY_FIELD_TYPE_HERMES_ADAPTIVE = 75,
-    REB_BINARY_FIELD_TYPE_HERMES_TIMESTEPWARN = 76,
-    REB_BINARY_FIELD_TYPE_HERMES_STEPS = 77,
-    REB_BINARY_FIELD_TYPE_HERMES_STEPS_MA = 78,
-    REB_BINARY_FIELD_TYPE_HERMES_STEPS_MN = 79,
     REB_BINARY_FIELD_TYPE_PARTICLES = 85,
     REB_BINARY_FIELD_TYPE_VARCONFIG = 86,
     REB_BINARY_FIELD_TYPE_FUNCTIONPOINTERS = 87,
@@ -595,14 +587,20 @@ enum REB_BINARY_FIELD_TYPE {
     REB_BINARY_FIELD_TYPE_JANUS_ORDER = 115,
     REB_BINARY_FIELD_TYPE_JANUS_RECALC = 116,
     REB_BINARY_FIELD_TYPE_WHFAST_COORDINATES = 117,
-    REB_BINARY_FIELD_TYPE_MERCURIUS_RCRIT = 118,
+    REB_BINARY_FIELD_TYPE_MERCURIUS_HILLFAC = 118,
     REB_BINARY_FIELD_TYPE_MERCURIUS_SAFEMODE = 119,
     REB_BINARY_FIELD_TYPE_MERCURIUS_ISSYNCHRON = 120,
-    REB_BINARY_FIELD_TYPE_MERCURIUS_M0 = 121,
-    REB_BINARY_FIELD_TYPE_MERCURIUS_RHILL = 122,
-    REB_BINARY_FIELD_TYPE_MERCURIUS_KEEPUNSYNC = 124,
+    REB_BINARY_FIELD_TYPE_MERCURIUS_DCRIT = 122,
     REB_BINARY_FIELD_TYPE_SAVERSION = 125,
     REB_BINARY_FIELD_TYPE_WALLTIME = 126,
+    REB_BINARY_FIELD_TYPE_PYTHON_UNIT_L = 130,
+    REB_BINARY_FIELD_TYPE_PYTHON_UNIT_M = 131,
+    REB_BINARY_FIELD_TYPE_PYTHON_UNIT_T = 132,
+    REB_BINARY_FIELD_TYPE_MERCURIUS_COMPOS = 133,
+    REB_BINARY_FIELD_TYPE_MERCURIUS_COMVEL = 134,
+    REB_BINARY_FIELD_TYPE_SAAUTOSTEP = 135,
+    REB_BINARY_FIELD_TYPE_SANEXTSTEP = 136,
+    REB_BINARY_FIELD_TYPE_STEPSDONE = 137,
     REB_BINARY_FIELD_TYPE_HEADER = 1329743186,  // Corresponds to REBO (first characters of header text)
     REB_BINARY_FIELD_TYPE_SABLOB = 9998,        // SA Blob
     REB_BINARY_FIELD_TYPE_END = 9999,
@@ -639,6 +637,7 @@ struct reb_simulationarchive{
     long size_snapshot;     ///< Size of snapshot (only used for version 1)
     double auto_interval;   ///< Interval setting used to create SA (if used)
     double auto_walltime;   ///< Walltime setting used to create SA (if used)
+    unsigned long long auto_step;  ///< Steps in-between SA snapshots (if used)
     long nblobs;            ///< Total number of snapshots (including initial binary)
     uint32_t* offset;       ///< Index of offsets in file (length nblobs)
     double* t;              ///< Index of simulation times in file (length nblobs)
@@ -662,31 +661,6 @@ struct reb_hash_pointer_pair{
  * @details These are the main REBOUND structures
  * @{
 */
-/**
- * @brief Structure representing one REBOUND particle.
- * @details This structure is used to represent one particle. 
- * If this structure is changed, the corresponding python structure
- * needs to be changes as well. Also update the equivalent declaration 
- * for MPI in communications_mpi.c.
- */
-struct reb_particle {
-    double x;           ///< x-position of the particle. 
-    double y;           ///< y-position of the particle. 
-    double z;           ///< z-position of the particle. 
-    double vx;          ///< x-velocity of the particle. 
-    double vy;          ///< y-velocity of the particle. 
-    double vz;          ///< z-velocity of the particle. 
-    double ax;          ///< x-acceleration of the particle. 
-    double ay;          ///< y-acceleration of the particle. 
-    double az;          ///< z-acceleration of the particle. 
-    double m;           ///< Mass of the particle. 
-    double r;           ///< Radius of the particle. 
-    double lastcollision;       ///< Last time the particle had a physical collision.
-    struct reb_treecell* c;     ///< Pointer to the cell the particle is currently in.
-    uint32_t hash;      ///< hash to identify particle.
-    void* ap;           ///< Functionality for externally adding additional properties to particles.
-    struct reb_simulation* sim; ///< Pointer to the parent simulation.
-};
 
 
 /**
@@ -711,6 +685,7 @@ struct reb_orbit {
     double l;        ///< Mean Longitude
     double theta;    ///< True Longitude
     double T;        ///< Time of pericenter passage
+    double rhill;    ///< Circular Hill radius 
 };
 
 /**
@@ -729,6 +704,7 @@ struct reb_simulation {
     double  softening;              ///< Gravitational softening parameter. Default: 0. 
     double  dt;                     ///< Current timestep. 
     double  dt_last_done;           ///< Last dt used by integrator
+    unsigned long long steps_done;  ///< Timesteps done
     int     N;                      ///< Current number of particles on this node. 
     int     N_var;                  ///< Total number of variational particles. Default: 0.
     int     var_config_N;           ///< Number of variational configuration structs. Default: 0.
@@ -762,6 +738,9 @@ struct reb_simulation {
     int track_energy_offset;        ///< Track energy change during collisions and ejections (default: 0).
     double energy_offset;           ///< Energy offset due to collisions and ejections (only calculated if track_energy_offset=1).
     double walltime;                ///< Walltime in seconds used by REBOUND for this simulation (integration only, not visualization, heartbeat function, etc).
+    uint32_t python_unit_l;         ///< Information only used for when working with units in python.
+    uint32_t python_unit_m;         ///< Information only used for when working with units in python.
+    uint32_t python_unit_t;         ///< Information only used for when working with units in python.
     /** @} */
 
     /**
@@ -841,7 +820,9 @@ struct reb_simulation {
     long   simulationarchive_size_snapshot;     ///< (Deprecated SAV1) Size of a snapshot in a SA (other than 1st), in bytes
     double simulationarchive_auto_interval;     ///< Current sampling cadence, in code units
     double simulationarchive_auto_walltime;     ///< Current sampling cadence, in wall time
+    unsigned long long simulationarchive_auto_step;  ///< Current sampling cadence, in time steps
     double simulationarchive_next;              ///< Next output time (simulation tim or wall time, depending on wether auto_interval or auto_walltime is set)
+    unsigned long long simulationarchive_next_step; ///< Next output step (only used if auto_steps is set)
     char*  simulationarchive_filename;          ///< Name of output file
     /** @} */
 
@@ -875,7 +856,7 @@ struct reb_simulation {
         REB_INTEGRATOR_WHFAST = 1,   ///< WHFast integrator, symplectic, 2nd order, up to 11th order correctors
         REB_INTEGRATOR_SEI = 2,      ///< SEI integrator for shearing sheet simulations, symplectic, needs OMEGA variable
         REB_INTEGRATOR_LEAPFROG = 4, ///< LEAPFROG integrator, simple, 2nd order, symplectic
-        REB_INTEGRATOR_HERMES = 5,   ///< HERMES Integrator for close encounters (experimental)
+        // REB_INTEGRATOR_HERMES = 5,   ///< HERMES Integrator, not available anymore. Use MERCURIUS instead.
         REB_INTEGRATOR_NONE = 7,     ///< Do not integrate anything
         REB_INTEGRATOR_JANUS = 8,    ///< Bit-wise reversible JANUS integrator.
         REB_INTEGRATOR_MERCURIUS = 9,///< MERCURIUS integrator 
@@ -911,7 +892,6 @@ struct reb_simulation {
     struct reb_simulation_integrator_sei ri_sei;        ///< The SEI struct 
     struct reb_simulation_integrator_whfast ri_whfast;  ///< The WHFast struct 
     struct reb_simulation_integrator_ias15 ri_ias15;    ///< The IAS15 struct
-    struct reb_simulation_integrator_hermes ri_hermes;    ///< The HERMES struct
     struct reb_simulation_integrator_mercurius ri_mercurius;      ///< The MERCURIUS struct
     struct reb_simulation_integrator_janus ri_janus;    ///< The JANUS struct 
     /** @} */
@@ -986,6 +966,14 @@ struct reb_simulation {
  * before any particles are added.
  */
 struct reb_simulation* reb_create_simulation(void);
+
+/**
+ * @brief Creates a deep copy of a REBOUND simulation
+ * @details All simulation data, including all particle data will be copied. Function pointers
+ * need to be set manually afterwards. 
+ * Working on the copy will not affect the original simulation.
+ */
+struct reb_simulation* reb_copy_simulation(struct reb_simulation* r);
 
 /**
  * @brief Initialize reb_simulation structure.
@@ -1142,6 +1130,19 @@ struct reb_particle* reb_get_particle_by_hash(struct reb_simulation* const r, ui
  */
 void reb_run_heartbeat(struct reb_simulation* const r);
 
+
+/**
+ * @brief A force switching function for the MERCURIUS integrator. This function implements 
+ * the same polynomial switching function used in MERCURY. 
+ */
+double reb_integrator_mercurius_L_mercury(const struct reb_simulation* const r, double d, double dcrit);           
+
+/**
+ * @brief A force switching function for the MERCURIUS integrator. This function implements 
+ * an infinitely differentiable switching function. 
+ */
+double reb_integrator_mercurius_L_infinite(const struct reb_simulation* const r, double d, double dcrit);           
+
 /**
  * @brief Resolve collision by simply halting the integration and setting r->status=REB_EXIT_COLLISION (Default)
  */
@@ -1155,7 +1156,7 @@ int reb_collision_resolve_hardsphere(struct reb_simulation* const r, struct reb_
 /**
  * @brief Merging collision resolving routine.
  * @details Merges particle with higher index into particle of lower index.
- *          Conserves mass, momentum and volume. Compatible with HERMES. 
+ *          Conserves mass, momentum and volume.  
  */
 int reb_collision_resolve_merge(struct reb_simulation* const r, struct reb_collision c);
 
@@ -1200,8 +1201,18 @@ double reb_random_normal(double variance);
 double reb_random_rayleigh(double sigma);
 
 /**
+ * @brief Move to the heliocentric frame.
+ * @details This function moves all particles to the heliocentric 
+ * frame. Note that the simulation will not stay in the heliocentric frame
+ * as it is not an inertial frame. Variational particles are not affected
+ * by the function.
+ * @param r The rebound simulation to be considered
+ */
+void reb_move_to_hel(struct reb_simulation* const r);
+
+/**
  * @brief Move to center of momentum and center of mass frame.
- * @details This function moved all particles to the center of mass 
+ * @details This function moves all particles to the center of mass 
  * frame (sometimes also called center of momentum frame). In this frame
  * the center of mass is at rest.
  * It is recommended to call this function before you are doing a long
@@ -1236,8 +1247,23 @@ struct reb_particle reb_get_com_of_pair(struct reb_particle p1, struct reb_parti
  * @param radius 1D array to to hold particle radii
  * @param xyz 3D array to to hold particle positions
  * @param vxvyvz 3D array to to hold particle velocities
+ * @param xyzvxvyvz 3D array to to hold particle positions and velocities
 */
-void reb_serialize_particle_data(struct reb_simulation* r, uint32_t* hash, double* m, double* radius, double (*xyz)[3], double (*vxvyvz)[3]);
+void reb_serialize_particle_data(struct reb_simulation* r, uint32_t* hash, double* m, double* radius, double (*xyz)[3], double (*vxvyvz)[3], double (*xyzvxvyvz)[6]);
+
+/**
+ * @brief Sets particle data to data provided in arrays. 
+ * @details This function can be used to quickly set particle data in a serialized form.
+ * NULL pointers will not be accessed.
+ * @param r The rebound simulation to be considered
+ * @param hash 1D array to to hold particle hashes
+ * @param mass 1D array to to hold particle masses
+ * @param radius 1D array to to hold particle radii
+ * @param xyz 3D array to to hold particle positions
+ * @param vxvyvz 3D array to to hold particle velocities
+ * @param xyzvxvyvz 3D array to to hold particle positions and velocities
+*/
+void reb_set_serialized_particle_data(struct reb_simulation* r, uint32_t* hash, double* m, double* radius, double (*xyz)[3], double (*vxvyvz)[3], double (*xyzvxvyvz)[6]);
 
 /**
  * @brief Takes the center of mass of a system of particles and returns the center of mass with one of the particles removed. 
@@ -1471,11 +1497,6 @@ enum reb_input_binary_messages {
 };
 
 /**
- * @brief Similar to reb_create_simulation_from_binary() but allows takes simulation as an argument (will be overwritten) and allows for manual message handling.
- */
-void reb_create_simulation_from_binary_with_messages(struct reb_simulation* r, char* filename, enum reb_input_binary_messages* messages);
-
-/**
  * @brief This function sets up a Plummer sphere.
  * @param r The rebound simulation to be considered
  * @param _N Number of particles in the plummer sphere.
@@ -1607,39 +1628,29 @@ struct reb_particle reb_derivatives_m_f(double G, struct reb_particle primary, s
  */
 /**
  * @brief Subtract particle p2 from particle p1 (p1 - p2).
- * @details Subtracts positions, velocities, accelerations and mass element by element. 
- * @param p1 First reb_particle.
+ * @details Subtracts positions, velocities, and mass element by element. 
+ * @param p1 First reb_particle (will be modified)
  * @param p2 Second reb_particle to subtract from p1.
  * @returns A new particle with no pointers (not in any simulation etc.) set.
  */
-struct reb_particle reb_particle_minus(struct reb_particle p1, struct reb_particle p2);
+void reb_particle_isub(struct reb_particle* p1, struct reb_particle* p2);
 
 /**
- * @brief Add particle p1 to particle p1.
- * @details Adds positions, velocities, accelerations and mass element by element. 
- * @param p1 First reb_particle.
+ * @brief Add particle p2 to particle p1.
+ * @details Adds positions, velocities, and mass element by element. 
+ * @param p1 First reb_particle (will be modified)
  * @param p2 Second reb_particle.
- * @returns A new particle with no pointers (not in any simulation etc.) set.
  */
-struct reb_particle reb_particle_plus(struct reb_particle p1, struct reb_particle p2);
+void reb_particle_iadd(struct reb_particle* p1, struct reb_particle* p2);
 
 /**
  * @brief Multiply a particle's members by a constant.
- * @details Multiplies particle's positions, velocities, accelerations and mass by a constant.
+ * @details Multiplies particle's positions, velocities, and mass by a constant.
  * @param p1 reb_particle to modify.
  * @param value Value by which to multiply particle's fields.
- * @returns A new particle with no pointers (not in any simulation etc.) set.
  */
-struct reb_particle reb_particle_multiply(struct reb_particle p1, double value);
+void reb_particle_imul(struct reb_particle* p1, double value);
 
-/**
- * @brief Divide a particle's members by a constant.
- * @details Divides particle's positions, velocities, accelerations and mass by a constant.
- * @param p1 reb_particle to modify.
- * @param value Value by which to divide particle's fields.
- * @returns A new particle with no pointers (not in any simulation etc.) set.
- */
-struct reb_particle reb_particle_divide(struct reb_particle p1, double value);
 /** @} */
 
 /**
@@ -1652,6 +1663,11 @@ struct reb_particle reb_particle_divide(struct reb_particle p1, double value);
  * @brief Allocates a simulation and sets it to a specific snapshot in a SimulationArchive file.
  */
 struct reb_simulation* reb_create_simulation_from_simulationarchive(struct reb_simulationarchive* sa, long snapshot);
+
+/**
+ * @brief Equivalent to reb_create_simulation_from_simulationarchive() but also processes warning messages.
+ */
+void reb_create_simulation_from_simulationarchive_with_messages(struct reb_simulation* r, struct reb_simulationarchive* sa, long snapshot, enum reb_input_binary_messages* warnings);
 
 /**
  * @brief Opens a SimulationArchive
@@ -1702,6 +1718,15 @@ void reb_simulationarchive_automate_interval(struct reb_simulation* const r, con
 void reb_simulationarchive_automate_walltime(struct reb_simulation* const r, const char* filename, double walltime);
 
 /**
+ * @brief Automatically create a SimulationArchive Snapshot after a fixed number of timesteps
+ * @param r The rebound simulation to be considered.
+ * @param filename The path and filename of the SimulationArchive output file.
+ * @param unsigned long long The number of timesteps between snapshots.
+ */
+void reb_simulationarchive_automate_step(struct reb_simulation* const r, const char* filename, unsigned long long step);
+
+
+/**
  * @cond PRIVATE
  */
 
@@ -1737,9 +1762,9 @@ void reb_free_simulationarchive_pointers(struct reb_simulationarchive* sa);
  * @param N number of particles in the array.
  */
 
-void reb_transformations_inertial_to_jacobi_posvel(const struct reb_particle* const particles, struct reb_particle* const p_j, const struct reb_particle* const p_mass, const int N);
-void reb_transformations_inertial_to_jacobi_posvelacc(const struct reb_particle* const particles, struct reb_particle* const p_j, const struct reb_particle* const p_mass, const int N);
-void reb_transformations_inertial_to_jacobi_acc(const struct reb_particle* const particles, struct reb_particle* const p_j,const struct reb_particle* const p_mass, const int N);
+void reb_transformations_inertial_to_jacobi_posvel(const struct reb_particle* const particles, struct reb_particle* const p_j, const struct reb_particle* const p_mass, const unsigned int N);
+void reb_transformations_inertial_to_jacobi_posvelacc(const struct reb_particle* const particles, struct reb_particle* const p_j, const struct reb_particle* const p_mass, const unsigned int N);
+void reb_transformations_inertial_to_jacobi_acc(const struct reb_particle* const particles, struct reb_particle* const p_j,const struct reb_particle* const p_mass, const unsigned int N);
 /** @} */
 /**
  * \name From Jacobi to inertial coordinates
@@ -1752,9 +1777,9 @@ void reb_transformations_inertial_to_jacobi_acc(const struct reb_particle* const
  * particles in ps, p_mass should be the corresponding array of real particles.
  * @param N number of particles in the array.
  */
-void reb_transformations_jacobi_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const int N);
-void reb_transformations_jacobi_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const int N);
-void reb_transformations_jacobi_to_inertial_acc(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const int N);
+void reb_transformations_jacobi_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const unsigned int N);
+void reb_transformations_jacobi_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const unsigned int N);
+void reb_transformations_jacobi_to_inertial_acc(struct reb_particle* const particles, const struct reb_particle* const p_j, const struct reb_particle* const p_mass, const unsigned int N);
 /** @} */
 /**
  * \name From inertial to democratic heliocentric coordinates
@@ -1766,8 +1791,8 @@ void reb_transformations_jacobi_to_inertial_acc(struct reb_particle* const parti
  * @param N number of particles in the array.
  * @param N_active number of active particles in the array.
  */
-void reb_transformations_inertial_to_democraticheliocentric_posvel(const struct reb_particle* const particles, struct reb_particle* const p_h, const int N);
-void reb_transformations_inertial_to_democraticheliocentric_posvel_testparticles(const struct reb_particle* const particles, struct reb_particle* const p_h, const int N, const int N_active);
+void reb_transformations_inertial_to_democraticheliocentric_posvel(const struct reb_particle* const particles, struct reb_particle* const p_h, const unsigned int N);
+void reb_transformations_inertial_to_democraticheliocentric_posvel_testparticles(const struct reb_particle* const particles, struct reb_particle* const p_h, const unsigned int N, const int N_active);
 /** @} */
 /**
  * \name From democratic heliocentric to inertial coordinates
@@ -1779,10 +1804,10 @@ void reb_transformations_inertial_to_democraticheliocentric_posvel_testparticles
  * @param N number of particles in the array.
  * @param N_active number of active particles in the array.
  */
-void reb_transformations_democraticheliocentric_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N);
-void reb_transformations_democraticheliocentric_to_inertial_pos_testparticles(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N, const int N_active);
-void reb_transformations_democraticheliocentric_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N);
-void reb_transformations_democraticheliocentric_to_inertial_posvel_testparticles(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N, const int N_active);
+void reb_transformations_democraticheliocentric_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N);
+void reb_transformations_democraticheliocentric_to_inertial_pos_testparticles(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N, const int N_active);
+void reb_transformations_democraticheliocentric_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N);
+void reb_transformations_democraticheliocentric_to_inertial_posvel_testparticles(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N, const int N_active);
 /** @} */
 /**
  * \name From inertial to WHDS coordinates
@@ -1793,7 +1818,7 @@ void reb_transformations_democraticheliocentric_to_inertial_posvel_testparticles
  * @param p_h Particles array in which the WHDS quantities will be stored.
  * @param N number of particles in the array.
  */
-void reb_transformations_inertial_to_whds_posvel(const struct reb_particle* const particles, struct reb_particle* const p_h, const int N);
+void reb_transformations_inertial_to_whds_posvel(const struct reb_particle* const particles, struct reb_particle* const p_h, const unsigned int N);
 /** @} */
 /**
  * \name From WHDS to inertial coordinates
@@ -1804,8 +1829,8 @@ void reb_transformations_inertial_to_whds_posvel(const struct reb_particle* cons
  * @param p_h Particles array in which the WHDS quantities will be stored.
  * @param N number of particles in the array.
  */
-void reb_transformations_whds_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N);
-void reb_transformations_whds_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_h, const int N);
+void reb_transformations_whds_to_inertial_pos(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N);
+void reb_transformations_whds_to_inertial_posvel(struct reb_particle* const particles, const struct reb_particle* const p_h, const unsigned int N);
 /** @} */
 /** @} */
 
@@ -1858,6 +1883,13 @@ int reb_add_var_2nd_order(struct reb_simulation* const r, int testparticle, int 
  */
 void reb_tools_megno_init(struct reb_simulation* const r);
 
+/** 
+ * @brief Init the MEGNO particles, enable MEGNO calculation, and specify a seed for the random number generation.
+ * @param r The rebound simulation to be considered
+ * @param seed The seed to use for the random number generator
+ */
+void reb_tools_megno_init_seed(struct reb_simulation* const r, unsigned int seed);
+
 /**
  * @brief Get the current MEGNO value
  * @param r The rebound simulation to be considered
@@ -1909,11 +1941,37 @@ void reb_error(struct reb_simulation* const r, const char* const msg);
  */
 int reb_get_next_message(struct reb_simulation* const r, char* const buf);
 /** @} */
+/** @} */
 
 /**
  * @cond PRIVATE
- * Related to OpenGL/WebGL visualization. Nothing to be changed by the user.
+ * Internal functions for calling various integrator steps. Nothing to be changed by the user.
  */
+
+void reb_integrator_whfast_from_inertial(struct reb_simulation* const r);   ///< Internal function to the appropriate WHFast coordinates from inertial
+void reb_integrator_whfast_to_inertial(struct reb_simulation* const r); ///< Internal function to move back from particular WHFast coordinates to inertial
+void reb_integrator_whfast_reset(struct reb_simulation* r);		///< Internal function used to call a specific integrator
+void reb_whfast_interaction_step(struct reb_simulation* const r, const double _dt);///< Internal function
+void reb_whfast_jump_step(const struct reb_simulation* const r, const double _dt); ///< Internal function
+void reb_whfast_kepler_step(const struct reb_simulation* const r, const double _dt); ///< Internal function
+void reb_whfast_com_step(const struct reb_simulation* const r, const double _dt); ///< Internal function
+void reb_integrator_ias15_part2(struct reb_simulation* r);              ///< Internal function used to call a specific integrator
+void reb_integrator_ias15_reset(struct reb_simulation* r);              ///< Internal function used to call a specific integrator
+int reb_integrator_whfast_init(struct reb_simulation* const r);    ///< Internal function to check errors and allocate memory if needed
+
+/** 
+ * @brief This function updates the acceleration on all particles. 
+ * @details It uses the current position and velocity data in the 
+ * (struct reb_particle*) particles structure.
+ */
+void reb_update_acceleration(struct reb_simulation* r);
+
+/** @endcond */
+
+/**
+* @cond PRIVATE
+* Related to OpenGL/WebGL visualization. Nothing to be changed by the user.
+*/
 struct reb_quaternion {
     double x, y, z, w;
 };

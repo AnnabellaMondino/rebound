@@ -1,5 +1,23 @@
 # Unit constants
 import math
+from . import clibrebound
+from ctypes import c_char_p, c_uint32
+
+def hash_to_unit(hash):
+    clibrebound.reb_hash.restype = c_uint32
+    for u in times_SI.keys():
+        uhash = clibrebound.reb_hash(c_char_p(u.encode("ascii")))
+        if uhash == hash:
+            return u
+    for u in masses_SI.keys():
+        uhash = clibrebound.reb_hash(c_char_p(u.encode("ascii")))
+        if uhash == hash:
+            return u
+    for u in lengths_SI.keys():
+        uhash = clibrebound.reb_hash(c_char_p(u.encode("ascii")))
+        if uhash == hash:
+            return u
+    return None
 
 # All units entered in SI (kg, m, s)
 G_SI = 6.67408e-11
@@ -20,7 +38,9 @@ lengths_SI =  {'m':1.,
     'cm':0.01,
     'km':1000.,
     'au':149597870700.,
-    'aus':149597870700.
+    'aus':149597870700.,
+    'pc':3.085677581e16,
+    'parsec':3.085677581e16
     }
 
     #What we measure accurately is GM, so set mass units such that G*M gives the value of GM in horizons.py (in the list at the end of horizons.py, the NAIF codes ending in 99 refer to the planets, single digits to the total mass of the planet plus its moons).  Have to multiply by 10**9 since that list has G in kg^-1km^3/s^2 and we use SI.
@@ -68,12 +88,17 @@ def convert_acc(acc, old_l, old_t, new_l, new_t):
     in_SI=acc*lengths_SI[old_l]/times_SI[old_t]**2
     return in_SI*times_SI[new_t]**2/lengths_SI[new_l]
 
-def convert_G(new_l, new_t, new_m):
+def convert_G(newunits):
+    new_l, new_t, new_m = newunits
     return G_SI*masses_SI[new_m]*times_SI[new_t]**2/lengths_SI[new_l]**3
        
 def check_units(newunits):   
     if len(newunits) is not 3:
         raise Exception("Error: Need to pass exactly 3 units for length, time, and mass (any order), see ipython_examples/Units.ipynb")
+
+    if isinstance(newunits, dict): 
+        # keys are not important as they are inferred from the values anyway
+        newunits = newunits.values() 
     
     l_unit = t_unit = m_unit = None
     for unit in newunits:

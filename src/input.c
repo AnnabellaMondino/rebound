@@ -34,6 +34,7 @@
 #include "collision.h"
 #include "input.h"
 #include "tree.h"
+#include "simulationarchive.h"
 #ifdef MPI
 #include "communication_mpi.h"
 #endif
@@ -85,34 +86,56 @@ char* reb_read_char(int argc, char** argv, const char* argument){
     return NULL;
 }
 
-void reb_read_dp7(struct reb_dp7* dp7, const int N3, FILE* inf){
-    dp7->p0 = malloc(sizeof(double)*N3);
-    dp7->p1 = malloc(sizeof(double)*N3);
-    dp7->p2 = malloc(sizeof(double)*N3);
-    dp7->p3 = malloc(sizeof(double)*N3);
-    dp7->p4 = malloc(sizeof(double)*N3);
-    dp7->p5 = malloc(sizeof(double)*N3);
-    dp7->p6 = malloc(sizeof(double)*N3);
-    fread(dp7->p0,sizeof(double),N3,inf);
-    fread(dp7->p1,sizeof(double),N3,inf);
-    fread(dp7->p2,sizeof(double),N3,inf);
-    fread(dp7->p3,sizeof(double),N3,inf);
-    fread(dp7->p4,sizeof(double),N3,inf);
-    fread(dp7->p5,sizeof(double),N3,inf);
-    fread(dp7->p6,sizeof(double),N3,inf);
+static size_t reb_fread(void *restrict ptr, size_t size, size_t nitems, FILE *restrict stream, char **restrict mem_stream){
+    if (mem_stream!=NULL){
+        // read from memory
+        memcpy(ptr,*mem_stream,size*nitems);
+        *mem_stream = (char*)(*mem_stream)+ size*nitems;
+        return size*nitems;
+    }else if(stream!=NULL){
+        // read from file
+        return fread(ptr,size,nitems,stream);
+    }
+    return 0; 
+}
+
+static int reb_fseek(FILE *stream, long offset, int whence, char **restrict mem_stream){
+    if (mem_stream!=NULL){
+        // read from memory
+        if (whence==SEEK_CUR){
+            *mem_stream = (char*)(*mem_stream)+offset;
+            return 0;
+        }
+        return -1;
+    }else if(stream!=NULL){
+        // read from file
+        return fseek(stream,offset,whence);
+    }
+    return -1;
+}
+
+
+void reb_read_dp7(struct reb_dp7* dp7, const int N3, FILE* inf, char **restrict mem_stream){
+    reb_fread(dp7->p0,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p1,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p2,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p3,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p4,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p5,sizeof(double),N3,inf,mem_stream);
+    reb_fread(dp7->p6,sizeof(double),N3,inf,mem_stream);
 }
 
 // Macro to read a single field from a binary file.
 #define CASE(typename, value) case REB_BINARY_FIELD_TYPE_##typename: \
     {\
-        fread(value, field.size,1,inf);\
+        reb_fread(value, field.size,1,inf,mem_stream);\
     }\
     break;
 
 #define CASE_MALLOC(typename, valueref) case REB_BINARY_FIELD_TYPE_##typename: \
     {\
         valueref = malloc(field.size);\
-        fread(valueref, field.size,1,inf);\
+        reb_fread(valueref, field.size,1,inf,mem_stream);\
     }\
     break;
 
@@ -125,19 +148,19 @@ void reb_read_dp7(struct reb_dp7* dp7, const int N3, FILE* inf){
         valueref.p4 = malloc(field.size/7);\
         valueref.p5 = malloc(field.size/7);\
         valueref.p6 = malloc(field.size/7);\
-        fread(valueref.p0, field.size/7,1,inf);\
-        fread(valueref.p1, field.size/7,1,inf);\
-        fread(valueref.p2, field.size/7,1,inf);\
-        fread(valueref.p3, field.size/7,1,inf);\
-        fread(valueref.p4, field.size/7,1,inf);\
-        fread(valueref.p5, field.size/7,1,inf);\
-        fread(valueref.p6, field.size/7,1,inf);\
+        reb_fread(valueref.p0, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p1, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p2, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p3, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p4, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p5, field.size/7,1,inf,mem_stream);\
+        reb_fread(valueref.p6, field.size/7,1,inf,mem_stream);\
     }\
     break;
     
-int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_messages* warnings){
+int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_messages* warnings, char **restrict mem_stream){
     struct reb_binary_field field;
-    int numread = fread(&field,sizeof(struct reb_binary_field),1,inf);
+    int numread = reb_fread(&field,sizeof(struct reb_binary_field),1,inf,mem_stream);
     if (numread<1){
         return 0; // End of file
     }
@@ -218,23 +241,22 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
         CASE(IAS15_EPSILONGLOBAL,&r->ri_ias15.epsilon_global);
         CASE(IAS15_ITERATIONSMAX,&r->ri_ias15.iterations_max_exceeded);
         CASE(IAS15_ALLOCATEDN,   &r->ri_ias15.allocatedN);
-        CASE(HERMES_HSF,         &r->ri_hermes.hill_switch_factor);
-        CASE(HERMES_SSF,         &r->ri_hermes.solar_switch_factor);
-        CASE(HERMES_ADAPTIVE,    &r->ri_hermes.adaptive_hill_switch_factor);
-        CASE(HERMES_TIMESTEPWARN,&r->ri_hermes.timestep_too_large_warning);
-        CASE(HERMES_STEPS,       &r->ri_hermes.steps);
-        CASE(HERMES_STEPS_MA,    &r->ri_hermes.steps_miniactive);
-        CASE(HERMES_STEPS_MN,    &r->ri_hermes.steps_miniN);
         CASE(JANUS_SCALEPOS,     &r->ri_janus.scale_pos);
         CASE(JANUS_SCALEVEL,     &r->ri_janus.scale_vel);
         CASE(JANUS_ORDER,        &r->ri_janus.order);
         CASE(JANUS_ALLOCATEDN,   &r->ri_janus.allocated_N);
         CASE(JANUS_RECALC,       &r->ri_janus.recalculate_integer_coordinates_this_timestep);
-        CASE(MERCURIUS_RCRIT,    &r->ri_mercurius.rcrit);
+        CASE(MERCURIUS_HILLFAC,  &r->ri_mercurius.hillfac);
         CASE(MERCURIUS_SAFEMODE, &r->ri_mercurius.safe_mode);
         CASE(MERCURIUS_ISSYNCHRON, &r->ri_mercurius.is_synchronized);
-        CASE(MERCURIUS_M0,       &r->ri_mercurius.m0);
-        CASE(MERCURIUS_KEEPUNSYNC, &r->ri_mercurius.keep_unsynchronized);
+        CASE(MERCURIUS_COMPOS,   &r->ri_mercurius.com_pos);
+        CASE(MERCURIUS_COMVEL,   &r->ri_mercurius.com_vel);
+        CASE(PYTHON_UNIT_L,      &r->python_unit_l);
+        CASE(PYTHON_UNIT_M,      &r->python_unit_m);
+        CASE(PYTHON_UNIT_T,      &r->python_unit_t);
+        CASE(STEPSDONE,          &r->steps_done);
+        CASE(SAAUTOSTEP,         &r->simulationarchive_auto_step);
+        CASE(SANEXTSTEP,         &r->simulationarchive_next_step);
         case REB_BINARY_FIELD_TYPE_PARTICLES:
             if(r->particles){
                 free(r->particles);
@@ -242,7 +264,7 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
             r->allocatedN = (int)(field.size/sizeof(struct reb_particle));
             if (field.size){
                 r->particles = malloc(field.size);
-                fread(r->particles, field.size,1,inf);
+                reb_fread(r->particles, field.size,1,inf,mem_stream);
             }
             if (r->allocatedN<r->N && warnings){
                 *warnings |= REB_INPUT_BINARY_WARNING_PARTICLES;
@@ -265,7 +287,7 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
             r->ri_whfast.allocated_N = (int)(field.size/sizeof(struct reb_particle));
             if (field.size){
                 r->ri_whfast.p_jh = malloc(field.size);
-                fread(r->ri_whfast.p_jh, field.size,1,inf);
+                reb_fread(r->ri_whfast.p_jh, field.size,1,inf,mem_stream);
             }
             break;
         case REB_BINARY_FIELD_TYPE_JANUS_PINT:
@@ -275,29 +297,29 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
             r->ri_janus.allocated_N = (int)(field.size/sizeof(struct reb_particle_int));
             if (field.size){
                 r->ri_janus.p_int = malloc(field.size);
-                fread(r->ri_janus.p_int, field.size,1,inf);
+                reb_fread(r->ri_janus.p_int, field.size,1,inf,mem_stream);
             }
             break;
         case REB_BINARY_FIELD_TYPE_VARCONFIG:
             if (r->var_config){
                 free(r->var_config);
             }
-            fread(r->var_config, field.size,1,inf);
             if (r->var_config_N>0){
                 r->var_config = malloc(field.size);
+                reb_fread(r->var_config, field.size,1,inf,mem_stream);
                 for (int l=0;l<r->var_config_N;l++){
                     r->var_config[l].sim = r;
                 }
             }
             break;
-        case REB_BINARY_FIELD_TYPE_MERCURIUS_RHILL:
-            if(r->ri_mercurius.rhill){
-                free(r->ri_mercurius.rhill);
+        case REB_BINARY_FIELD_TYPE_MERCURIUS_DCRIT:
+            if(r->ri_mercurius.dcrit){
+                free(r->ri_mercurius.dcrit);
             }
-            r->ri_mercurius.rhillallocatedN = (int)(field.size/sizeof(double));
+            r->ri_mercurius.dcrit_allocatedN = (int)(field.size/sizeof(double));
             if (field.size){
-                r->ri_mercurius.rhill = malloc(field.size);
-                fread(r->ri_mercurius.rhill, field.size,1,inf);
+                r->ri_mercurius.dcrit = malloc(field.size);
+                reb_fread(r->ri_mercurius.dcrit, field.size,1,inf,mem_stream);
             }
             break;
         CASE_MALLOC(IAS15_AT,     r->ri_ias15.at);
@@ -318,7 +340,7 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
         case REB_BINARY_FIELD_TYPE_FUNCTIONPOINTERS:
             {
                 int fpwarn;
-                fread(&fpwarn, field.size,1,inf);
+                reb_fread(&fpwarn, field.size,1,inf,mem_stream);
                 if (fpwarn && warnings){
                     *warnings |= REB_INPUT_BINARY_WARNING_POINTERS;
                 }
@@ -333,7 +355,7 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
                 const char* header = "REBOUND Binary File. Version: ";
                 sprintf(curvbuf,"%s%s",header+sizeof(struct reb_binary_field), reb_version_str);
                 
-                objects += fread(readbuf,sizeof(char),bufsize,inf);
+                objects += reb_fread(readbuf,sizeof(char),bufsize,inf,mem_stream);
                 // Note: following compares version, but ignores githash.
                 if(strncmp(readbuf,curvbuf,bufsize)!=0){
                     *warnings |= REB_INPUT_BINARY_WARNING_VERSION;
@@ -344,33 +366,11 @@ int reb_input_field(struct reb_simulation* r, FILE* inf, enum reb_input_binary_m
             if (warnings){
                 *warnings |= REB_INPUT_BINARY_WARNING_FIELD_UNKOWN;
             }
-            fseek(inf,field.size,SEEK_CUR);
+            reb_fseek(inf,field.size,SEEK_CUR,mem_stream);
             break;
     }
     return 1;
 } 
-
-void reb_create_simulation_from_binary_with_messages(struct reb_simulation* r, char* filename, enum reb_input_binary_messages* warnings){
-    FILE* inf = fopen(filename,"rb"); 
-    
-    if (!inf){
-        *warnings |= REB_INPUT_BINARY_ERROR_NOFILE;
-        return;
-    }
-
-    reb_reset_temporary_pointers(r);
-    reb_reset_function_pointers(r);
-    r->simulationarchive_filename = NULL;
-    
-    // reb_create_simulation sets simulationarchive_version to 2 by default.
-    // This will break reading in old version.
-    // Set to old version by default. Will be overwritten if new version was used.
-    r->simulationarchive_version = 0;
-
-    while(reb_input_field(r, inf, warnings)){ }
-
-    fclose(inf);
-}
 
 struct reb_simulation* reb_input_process_warnings(struct reb_simulation* r, enum reb_input_binary_messages warnings){
     if (warnings & REB_INPUT_BINARY_ERROR_NOFILE){
@@ -416,7 +416,18 @@ struct reb_simulation* reb_input_process_warnings(struct reb_simulation* r, enum
 struct reb_simulation* reb_create_simulation_from_binary(char* filename){
     enum reb_input_binary_messages warnings = REB_INPUT_BINARY_WARNING_NONE;
     struct reb_simulation* r = reb_create_simulation();
-    reb_create_simulation_from_binary_with_messages(r,filename,&warnings);
+    
+    struct reb_simulationarchive* sa = malloc(sizeof(struct reb_simulationarchive)); 
+    reb_read_simulationarchive_with_messages(sa, filename, &warnings);
+    if (warnings & REB_INPUT_BINARY_ERROR_NOFILE){
+        // Don't output an error if file does not exist, just return NULL.
+        free(sa);
+        return NULL;
+    }else{
+        reb_input_process_warnings(NULL, warnings);
+    }
+    reb_create_simulation_from_simulationarchive_with_messages(r, sa, -1, &warnings);
+    reb_close_simulationarchive(sa);
     r = reb_input_process_warnings(r, warnings);
     return r;
 }

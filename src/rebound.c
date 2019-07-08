@@ -38,7 +38,6 @@
 #include "integrator.h"
 #include "integrator_whfast.h"
 #include "integrator_ias15.h"
-#include "integrator_hermes.h"
 #include "integrator_mercurius.h"
 #include "boundary.h"
 #include "gravity.h"
@@ -47,6 +46,7 @@
 #include "output.h"
 #include "tools.h"
 #include "particle.h"
+#include "input.h"
 #include "simulationarchive.h"
 #ifdef MPI
 #include "communication_mpi.h"
@@ -62,7 +62,7 @@
 const int reb_max_messages_length = 1024;   // needs to be constant expression for array size
 const int reb_max_messages_N = 10;
 const char* reb_build_str = __DATE__ " " __TIME__;  // Date and time build string. 
-const char* reb_version_str = "3.6.3";         // **VERSIONLINE** This line gets updated automatically. Do not edit manually.
+const char* reb_version_str = "3.8.3";         // **VERSIONLINE** This line gets updated automatically. Do not edit manually.
 const char* reb_githash_str = STRINGIFY(GITHASH);             // This line gets updated automatically. Do not edit manually.
 
 static int reb_error_message_waiting(struct reb_simulation* const r);
@@ -150,15 +150,15 @@ void reb_step(struct reb_simulation* const r){
 
     // Search for collisions using local and essential tree.
     PROFILING_START()
-    if (r->integrator!=REB_INTEGRATOR_HERMES){ //Hybrid integrator will search for collisions in mini simulation.
-        reb_collision_search(r);
-    }
+    reb_collision_search(r);
     PROFILING_STOP(PROFILING_CAT_COLLISION)
     
     // Update walltime
     struct timeval time_end;
     gettimeofday(&time_end,NULL);
     r->walltime += time_end.tv_sec-time_beginning.tv_sec+(time_end.tv_usec-time_beginning.tv_usec)/1e6;
+    // Update step counter
+    r->steps_done++; // This also counts failed IAS15 steps
 }
 
 void reb_exit(const char* const msg){
@@ -307,6 +307,11 @@ void reb_free_pointers(struct reb_simulation* const r){
     reb_integrator_whfast_reset(r);
     reb_integrator_ias15_reset(r);
     reb_integrator_mercurius_reset(r);
+    if(r->free_particle_ap){
+        for(int i=0; i<r->N; i++){
+            r->free_particle_ap(&r->particles[i]);
+        }
+    }
     free(r->particles   );
     free(r->particle_lookup_table);
     if (r->messages){
@@ -349,27 +354,16 @@ void reb_reset_temporary_pointers(struct reb_simulation* const r){
     r->ri_ias15.csv         = NULL;
     r->ri_ias15.csa0        = NULL;
     r->ri_ias15.at          = NULL;
-    // ********** HERMES
-    r->ri_hermes.mini      = NULL;
-    r->ri_hermes.global    = NULL;
-    r->ri_hermes.global_index_from_mini_index = NULL;
-    r->ri_hermes.global_index_from_mini_index_N = 0;
-    r->ri_hermes.global_index_from_mini_index_Nmax = 0;
-    r->ri_hermes.is_in_mini = NULL;
-    r->ri_hermes.is_in_mini_Nmax = 0;
-    r->ri_hermes.a_Nmax = 0;
-    r->ri_hermes.a_i = NULL;
-    r->ri_hermes.a_f = NULL;
+    r->ri_ias15.map_allocated_N      = 0;
+    r->ri_ias15.map         = NULL;
     // ********** MERCURIUS
-    r->ri_mercurius.rhillallocatedN = 0;
     r->ri_mercurius.allocatedN = 0;
-    r->ri_mercurius.rhill = NULL;
-    r->ri_mercurius.encounterRhill = NULL;
-    r->ri_mercurius.encounterIndicies = NULL;
-    r->ri_mercurius.encounterAllocatedN = 0;
-    r->ri_mercurius.encounterParticles = NULL;
-    r->ri_mercurius.p_hold = NULL;
-    r->ri_mercurius.keep_unsynchronized = 0;
+    r->ri_mercurius.allocatedN_additionalforces = 0;
+    r->ri_mercurius.dcrit_allocatedN = 0;
+    r->ri_mercurius.dcrit = NULL;
+    r->ri_mercurius.particles_backup = NULL;
+    r->ri_mercurius.particles_backup_additionalforces = NULL;
+    r->ri_mercurius.encounter_map = NULL;
 
     // ********** JANUS
     r->ri_janus.allocated_N = 0;
@@ -409,6 +403,33 @@ struct reb_simulation* reb_create_simulation(){
     return r;
 }
 
+
+void _reb_copy_simulation_with_messages(struct reb_simulation* r_copy,  struct reb_simulation* r, enum reb_input_binary_messages* warnings){
+    char* bufp;
+    size_t sizep;
+    reb_output_binary_to_stream(r, &bufp,&sizep);
+    
+    reb_reset_temporary_pointers(r_copy);
+    reb_reset_function_pointers(r_copy);
+    r_copy->simulationarchive_filename = NULL;
+    
+    // Set to old version by default. Will be overwritten if new version was used.
+    r_copy->simulationarchive_version = 0;
+
+    char* bufp_beginning = bufp; // bufp will be changed
+    while(reb_input_field(r_copy, NULL, warnings, &bufp)){ }
+    free(bufp_beginning);
+    
+}
+
+struct reb_simulation* reb_copy_simulation(struct reb_simulation* r){
+    struct reb_simulation* r_copy = reb_create_simulation();
+    enum reb_input_binary_messages warnings = REB_INPUT_BINARY_WARNING_NONE;
+    _reb_copy_simulation_with_messages(r_copy,r,&warnings);
+    r = reb_input_process_warnings(r, warnings);
+    return r_copy;
+}
+
 void reb_init_simulation(struct reb_simulation* r){
     reb_tools_init_srand();
     reb_reset_temporary_pointers(r);
@@ -418,6 +439,7 @@ void reb_init_simulation(struct reb_simulation* r){
     r->softening    = 0;
     r->dt       = 0.001;
     r->dt_last_done = 0.;
+    r->steps_done = 0;
     r->root_size    = -1;
     r->root_nx  = 1;
     r->root_ny  = 1;
@@ -462,7 +484,9 @@ void reb_init_simulation(struct reb_simulation* r){
     r->simulationarchive_version       = 2;    
     r->simulationarchive_auto_interval = 0.;    
     r->simulationarchive_auto_walltime = 0.;    
+    r->simulationarchive_auto_step     = 0;    
     r->simulationarchive_next          = 0.;    
+    r->simulationarchive_next_step     = 0;    
     r->simulationarchive_filename      = NULL;    
     
     // Default modules
@@ -500,27 +524,14 @@ void reb_init_simulation(struct reb_simulation* r){
     r->ri_sei.OMEGAZ    = -1;
     r->ri_sei.lastdt    = 0;
     
-    // ********** HERMES
-    r->ri_hermes.mini_active = 0;
-    r->ri_hermes.collision_this_global_dt = 0;
-    r->ri_hermes.steps = 0;
-    r->ri_hermes.steps_miniactive = 0;
-    r->ri_hermes.steps_miniN = 0;
-    r->ri_hermes.timestep_too_large_warning = 0;
-    r->ri_hermes.solar_switch_factor = 15.;
-    r->ri_hermes.hill_switch_factor = 3.;            
-    r->ri_hermes.adaptive_hill_switch_factor = 1;    
-    r->ri_hermes.current_hill_switch_factor = 3.;     //Internal 
-    
     // ********** MERCURIUS
     r->ri_mercurius.mode = 0;
     r->ri_mercurius.safe_mode = 1;
     r->ri_mercurius.recalculate_coordinates_this_timestep = 0;
-    r->ri_mercurius.recalculate_rhill_this_timestep = 0;
+    r->ri_mercurius.recalculate_dcrit_this_timestep = 0;
     r->ri_mercurius.is_synchronized = 1;
     r->ri_mercurius.encounterN = 0;
-    r->ri_mercurius.m0 = 0;
-    r->ri_mercurius.rcrit = 3;
+    r->ri_mercurius.hillfac = 3;
 
     // Tree parameters. Will not be used unless gravity or collision search makes use of tree.
     r->tree_needs_update= 0;
@@ -560,7 +571,10 @@ int reb_check_exit(struct reb_simulation* const r, const double tmax, double* la
         usleep(1000);
     }
     const double dtsign = copysign(1.,r->dt);   // Used to determine integration direction
-    if (r->status>=0 || reb_error_message_waiting(r)){
+    if (reb_error_message_waiting(r)){
+        r->status = REB_EXIT_ERROR;
+    }
+    if (r->status>=0){
         // Exit now.
     }else if(tmax!=INFINITY){
         if(r->exact_finish_time==1){

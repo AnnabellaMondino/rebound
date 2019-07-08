@@ -52,11 +52,12 @@ class SimulationArchive(Structure):
                 ("size_snapshot", c_long), 
                 ("auto_interval", c_double), 
                 ("auto_walltime", c_double), 
+                ("auto_step", c_ulonglong), 
                 ("nblobs", c_long), 
                 ("offset", POINTER(c_uint32)), 
                 ("t", POINTER(c_double)) 
                 ]
-    def __init__(self,filename,setup=None, setup_args=(), rebxfilename=None):
+    def __init__(self,filename,setup=None, setup_args=(), rebxfilename=None, process_warnings=True):
         """
         Arguments
         ---------
@@ -69,6 +70,8 @@ class SimulationArchive(Structure):
             Arguments passed to setup function.
         rebxfilename : str
             Filename of the REBOUNDx binary file.
+        process_warnings : Bool
+            Display warning messages if True (default). Only fail on major errors if set to False.
 
         """
         self.setup = setup
@@ -76,11 +79,17 @@ class SimulationArchive(Structure):
         self.rebxfilename = rebxfilename
         w = c_int(0)
         clibrebound.reb_read_simulationarchive_with_messages(byref(self),c_char_p(filename.encode("ascii")),byref(w))
-        if w.value & (1+16+32+64+256) :     # Major error
-            raise ValueError(BINARY_WARNINGS[0])
-        for message, value in BINARY_WARNINGS:  # Just warnings
+        for majorerror, value, message in BINARY_WARNINGS:
             if w.value & value:
-                warnings.warn(message, RuntimeWarning)
+                if majorerror:
+                    raise RuntimeError(message)
+                else:  
+                    # Just a warning
+                    if process_warnings:
+                        warnings.warn(message, RuntimeWarning)
+        else:
+            # Store for later
+            self.warnings = w
         if self.nblobs<1:
             RuntimeError("Something went wrong. SimulationArchive is empty.")
         self.tmin = self.t[0]
@@ -120,11 +129,13 @@ class SimulationArchive(Structure):
         if self.rebxfilename:
             import reboundx
             rebx = reboundx.Extras.from_file(sim, self.rebxfilename)
-        if w.value & (1+16+32+64+256) :     # Major error
-            raise ValueError(BINARY_WARNINGS[0])
-        for message, value in BINARY_WARNINGS:  # Just warnings
+        for majorerror, value, message in BINARY_WARNINGS:
             if w.value & value:
-                warnings.warn(message, RuntimeWarning)
+                if majorerror:
+                    raise RuntimeError(message)
+                else:  
+                    # Just a warning
+                    warnings.warn(message, RuntimeWarning)
         return sim
     
     def __setitem__(self, key, value):
@@ -216,10 +227,7 @@ class SimulationArchive(Structure):
         if mode=='snapshot':
             if sim.integrator=="whfast" and sim.ri_whfast.safe_mode == 1:
                 keep_unsynchronized = 0
-            if sim.integrator=="mercurius" and sim.ri_mercurius.safe_mode == 1:
-                keep_unsynchronized = 0
             sim.ri_whfast.keep_unsynchronized = keep_unsynchronized
-            sim.ri_mercurius.keep_unsynchronized = keep_unsynchronized
             sim.integrator_synchronize()
             return sim
         else:
@@ -229,7 +237,6 @@ class SimulationArchive(Structure):
                 keep_unsynchronized = 0
 
             sim.ri_whfast.keep_unsynchronized = keep_unsynchronized
-            sim.ri_mercurius.keep_unsynchronized = keep_unsynchronized
             exact_finish_time = 1 if mode=='exact' else 0
             sim.integrate(t,exact_finish_time=exact_finish_time)
                 
@@ -245,3 +252,96 @@ class SimulationArchive(Structure):
             yield self.getSimulation(t, **kwargs)
 
     
+    def getBezierPaths(self,origin=None):
+        """
+        This function returns array that can be used as a Cubic Bezier
+        Path in matplotlib. 
+        The function returns two arrays, the first one contains
+        the verticies for each particles and has the shape
+        (Nvert, Nparticles, 2) where Nvert is the number of verticies.
+        The second array returned describes the type of verticies to be
+        used with matplotlib's Patch class.
+
+        Arguments
+        ---------
+        origin : multiple, optional
+                 If `origin` is None (default), then none of the 
+                 coordinates are shifted. If `origin` is an integer
+                 then the particle with that index is used as the
+                 origin. if `origin` is equal to `com`, then the 
+                 centre of mass is used as the origin. 
+
+
+        Examples
+        --------
+        The following example reads in a SimulationArchive and plots
+        the trajectories as Cubic Bezier Curves. It also plots the 
+        actual datapoints stored in the SimulationArchive. 
+        Note that the SimulationArchive needs to have enough
+        datapoints to allow for smooth and reasonable orbits.
+
+        >>> from matplotlib.path import Path
+        >>> import matplotlib.patches as patches
+        >>> sa = rebound.SimulationArchive("test.bin")
+        >>> verts, codes = sa.getBezierPaths(origin=0)
+        >>> fig, ax = plt.subplots()
+        >>> for j in range(sa[0].N):
+        >>>     path = Path(verts[:,j,:], codes)
+        >>>     patch = patches.PathPatch(path, facecolor='none')
+        >>>     ax.add_patch(patch)
+        >>>     ax.scatter(verts[::3,j,0],verts[::3,j,1])
+        >>> ax.set_aspect('equal')
+        >>> ax.autoscale_view()
+        
+        """
+        import numpy as np
+        Npoints = len(self)*3-2
+        if len(self)<=1:
+            raise Runtim
+        Nparticles = self[0].N
+        verts = np.zeros((Npoints,Nparticles,2))
+        xy = np.zeros((len(self),Nparticles,2))
+
+        if origin=="com":
+            origin = -2
+        elif origin is not None:
+            try:
+                origin = int(origin)
+            except:
+                raise AttributeError("Cannot parse origin")
+            if origin<0 or origin>=Nparticles:
+                raise AttributeError("Origin index out of range")
+
+
+        for i, sim in enumerate(self):
+            if origin is None:
+                shift = (0,0,0,0)
+            elif origin == -2:
+                sp = sim.calculate_com()
+                shift = (sp.x,sp.y,sp.vx,sp.vy)
+            else:
+                sp = sim.particles[origin]
+                shift = (sp.x,sp.y,sp.vx,sp.vy)
+            for j in range(sim.N):
+                p = sim.particles[j]
+                if i==0:
+                    verts[0,j] = p.x-shift[0],p.y-shift[1]
+                    verts[1,j] = p.vx-shift[2], p.vy-shift[3]
+                else:
+                    dt = sim.t-tlast # time since last snapshot
+                    verts[-2+i*3,j] = verts[-2+i*3,j]*dt/3.+verts[-3+i*3,j]
+
+                    verts[ 0+i*3,j] = p.x-shift[0],p.y-shift[1]
+
+                    verts[-1+i*3,j] = -p.vx+shift[2], -p.vy+shift[3]
+                    verts[-1+i*3,j] = verts[-1+i*3+0,j]*dt/3.+verts[ 0+i*3,j]
+
+                    if i!=len(self)-1:
+                        verts[+1+i*3,j] = p.vx-shift[2], p.vy-shift[3]
+
+
+                xy[i,j] = p.x,p.y
+            tlast = sim.t
+        codes = np.full(Npoints,4,dtype=np.uint8) # Hardcoded 4 = matplotlib.path.Path.CURVE4
+        codes[0] = 1 # Hardcoded 1 = matplotlib.path.Path.MOVETO
+        return verts, codes
